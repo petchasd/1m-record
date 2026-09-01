@@ -1,97 +1,203 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# QrBench — QR-scan → 1M-row SQLite lookup benchmark
 
-# Getting Started
+A **benchmark harness, not a product**. It answers one question with defensible
+numbers: *สแกน QR แล้วค้นจาก SQLite บนเครื่อง (offline) ที่มี 1,000,000 records ใช้เวลาเท่าไร* —
+and it separates the DB time from the camera/UI time, because those differ by
+more than an order of magnitude.
 
-> **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
+## Stack (versions actually used)
 
-## Step 1: Start Metro
+| Thing | Version | Why |
+|---|---|---|
+| React Native | **0.87.1** (bare CLI, not Expo Go) | native modules required |
+| React | 19.2.3 | ships with RN 0.87 |
+| TypeScript | 6.0.3, `strict` + `noUncheckedIndexedAccess` | |
+| `@op-engineering/op-sqlite` | **18.1.4** | JSI; has a true `executeSync` so bridge overhead does not swamp a sub-ms query |
+| `better-sqlite3` | 13.0.3 (dev only) | builds the `.db` offline on the dev machine |
+| `react-native-vision-camera` | **not installed yet** — see below | Phase 3 only |
+| Node | **22.22.0** (`.nvmrc`) | RN 0.87 declares `engines.node >= 22.11.0` |
+| JDK | 17 (Zulu) | |
 
-First, you will need to run **Metro**, the JavaScript build tool for React Native.
+New architecture (Fabric/TurboModules) is **on**, Hermes is **on** — both are the
+RN 0.87 defaults and both are left untouched so the numbers reflect a stock app.
 
-To start the Metro dev server, run the following command from the root of your React Native project:
+### Deviations from the brief (and why)
 
-```sh
-# Using npm
-npm start
+- **Emulator is API 36.1 arm64-v8a, not API 34 x86_64.** The host is an Apple
+  Silicon Mac; the installed SDK has no `android-34` system image and no x86_64
+  image for any recent API. Running x86_64 would mean full CPU emulation, which
+  would make every timing meaningless. arm64-v8a runs natively via HVF.
+  The AVD used is `Pixel_9_Pro_XL` (4 cores, 2 GB RAM, 6 GB data partition).
+- **`reactNativeArchitectures=arm64-v8a` only** (`android/gradle.properties`).
+  Building all four ABIs triples NDK link time for op-sqlite + nitro with no
+  benefit here. Restore the full list before shipping to real users.
+- **vision-camera 5 cannot scan QR codes on Android — Phase 3 is deferred.**
+  The brief asks for vision-camera **v4** + its built-in `codeScanner`, and that
+  is the right call: v4.7.3 ships `useCodeScanner`, a real `CodeScannerPipeline.kt`,
+  and MLKit (`com.google.mlkit:barcode-scanning:17.3.0`) on Android. v5 rewrote
+  the library on nitro and replaced code scanning with `useObjectOutput`, whose
+  every type is marked `@platform iOS`; the Android factory is a stub:
 
-# OR using Yarn
-yarn start
+  ```kotlin
+  // HybridCameraFactory.kt:112
+  override fun createObjectOutput(options: ObjectOutputOptions): HybridCameraObjectOutputSpec {
+    throw Error("CameraObjectOutput is not available on Android!")
+  }
+  ```
+
+  v5.2.3 was installed by mistake (resolved as "latest" instead of the v4 the
+  brief pins). It — and its `nitro-modules` / `nitro-image` peers — have been
+  removed from the first build entirely: Phases 1 and 2, which carry the actual
+  question, need no camera at all, and dropping them cuts a large amount of NDK
+  compilation out of the critical path. Phase 3 will add **v4.7.3** back.
+- **One matrix cell is not expressible.** op-sqlite v18's `PreparedStatement`
+  exposes `bindSync` but only an **async** `execute()` — there is no
+  `executeSync` on a statement. So *prepared-reuse × synchronous API* is
+  reported as N/A rather than faked. The other three combinations
+  (fresh×sync, fresh×async, prepared×async) are all measured.
+
+## Setup
+
+```bash
+nvm use                 # 22.22.0, per .nvmrc
+yarn install
 ```
 
-## Step 2: Build and run your app
+Android SDK is expected at `$ANDROID_HOME`. `yarn android` writes
+`android/local.properties` itself if missing.
 
-With Metro running, open a new terminal window/pane from the root of your React Native project, and use one of the following commands to build and run your Android or iOS app:
+## Phase 1 — build the datasets
 
-### Android
+**Method A (default): build the `.db` offline, then push it.** Never insert 1M
+rows one-at-a-time from JS.
 
-```sh
-# Using npm
-npm run android
-
-# OR using Yarn
-yarn android
+```bash
+yarn seed                                     # 1,000,000 rows -> artifacts/items.db
+yarn seed --rows 100000 --out artifacts/items_100k.db
+yarn seed --rows 10000  --out artifacts/items_10k.db
+yarn seed --rows 1000000 --out artifacts/items_noindex.db --index none
 ```
 
-### iOS
+Seeding is deterministic: the same `--rows` + `--seed` produce a byte-identical
+file, so runs stay comparable across rebuilds (verified by `shasum`).
 
-For iOS, remember to install CocoaPods dependencies (this only needs to be run on first clone or after updating native deps).
+Measured on this machine (M-series, better-sqlite3, batch = 10k rows/txn):
 
-The first time you create a new project, run the Ruby bundler to install CocoaPods itself:
+| dataset | rows | insert | index | total | file |
+|---|---:|---:|---:|---:|---:|
+| `items.db` | 1,000,000 | 2.58 s (387k rows/s) | 199 ms | 2.81 s | **254.3 MB** |
+| `items_100k.db` | 100,000 | 264 ms | 18 ms | 285 ms | 25.4 MB |
+| `items_10k.db` | 10,000 | 28 ms | 2 ms | 31 ms | 2.5 MB |
+| `items_noindex.db` | 1,000,000 | 2.63 s | — | 2.67 s | 230.3 MB |
 
-```sh
-bundle install
+`EXPLAIN QUERY PLAN` at build time confirms the intended access path:
+
+```
+items.db          SEARCH items USING INDEX idx_items_qr (qr_code=?)
+items_noindex.db  SCAN items
 ```
 
-Then, and every time you update your native dependencies, run:
+### Push to the device
 
-```sh
-bundle exec pod install
+An app's `files/` dir is not writable by `adb` directly, so this is two stages —
+`adb push` to `/data/local/tmp`, then `run-as` to copy inside the sandbox:
+
+```bash
+yarn push-db                    # all artifacts/*.db
+yarn push-db --only items.db    # just the 1M dataset
+yarn push-db --stage-only       # push only, skip the run-as copy
 ```
 
-For more information, please visit [CocoaPods Getting Started guide](https://guides.cocoapods.org/using/getting-started.html).
+Before the first `yarn android` the app is not installed, so stage 2 is skipped
+automatically — **run `yarn push-db` again after the first build**. All four
+datasets total ~513 MB staged plus ~513 MB copied, so the AVD needs a data
+partition of at least ~2 GB free (`disk.dataPartition.size=6G` here). The script
+prints `df /data` and fails early rather than half-way through a 254 MB push.
 
-```sh
-# Using npm
-npm run ios
+Reclaim the staging copy afterwards:
 
-# OR using Yarn
-yarn ios
+```bash
+adb shell rm -rf /data/local/tmp/qrbench
 ```
 
-If everything is set up correctly, you should see your new app running in the Android Emulator, iOS Simulator, or your connected device.
+**Method B (in-app seeding)** exists to measure the worst case — what a user
+would sit through if the app built the dataset itself. It is driven from the
+Phase 1 screen ("seed 100,000" / "seed 1,000,000") and uses `executeBatch` with
+one tuple and many parameter sets, so a whole 10k batch crosses JSI once and
+loops in C++ inside a single transaction. Both methods generate rows from the
+same `src/db/rowgen.ts`, so the data is identical; only the physical page layout
+differs.
 
-This is one way to run your app — you can also build it directly from Android Studio or Xcode.
+## Run
 
-## Step 3: Modify your app
+```bash
+yarn android            # first build compiles op-sqlite + nitro NDK — slow
+yarn push-db            # now that the app exists, finish stage 2
+yarn start              # Metro, if not already running
+```
 
-Now that you have successfully run the app, let's make changes!
+The Phase 1 screen opens each dataset and shows, on-device:
+`COUNT(*)`, the index variant, verbatim `EXPLAIN QUERY PLAN`, the pragmas SQLite
+actually settled on (WAL can be refused), and a sample lookup result.
 
-Open `App.tsx` in your text editor of choice and make some changes. When you save, your app will automatically update and reflect these changes — this is powered by [Fast Refresh](https://reactnative.dev/docs/fast-refresh).
+## Phase 2 — run the benchmark
 
-When you want to forcefully reload, for example to reset the state of your app, you can perform a full reload:
+Switch to the **Phase 2** tab in the app. One button runs the whole matrix; no
+scanning by hand is involved.
 
-- **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Dev Menu**, accessed via <kbd>Ctrl</kbd> + <kbd>M</kbd> (Windows/Linux) or <kbd>Cmd ⌘</kbd> + <kbd>M</kbd> (macOS).
-- **iOS**: Press <kbd>R</kbd> in iOS Simulator.
+- 1,000 lookup keys are drawn ahead of the timed loop from a seeded RNG, so the
+  same keys are used every run and no work happens between the two clock reads.
+- **100 warm-up iterations are run and discarded**, then 1,000 measured.
+- Every cell reports `n / min / p50 / p90 / p95 / p99 / max / mean / stddev`,
+  plus a **batch mean** (whole-loop wall time ÷ iterations). The batch mean is
+  the fallback truth: Hermes' `performance.now()` may quantise to 1 ms, in which
+  case a single sub-millisecond sample is a rounding artefact. The screen prints
+  the measured clock resolution at the top so this is checkable, not assumed.
+- *run ×3 (variance)* repeats the matrix three times and reports the spread of
+  the baseline p50 — the "<10% across 3 runs" acceptance check.
 
-## Congratulations! :tada:
+Cold start is a separate button and a separate script, because it is only honest
+if the query is the *first* thing a fresh process does:
 
-You've successfully run and modified your React Native App. :partying_face:
+```bash
+yarn cold-start             # force-stop + relaunch: app/SQLite cache cold,
+                            # but the Linux page cache still holds the file
+yarn cold-start --reboot    # reboot first: OS page cache cold too (pessimistic)
+```
 
-### Now what?
+Collect everything the app recorded:
 
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [docs](https://reactnative.dev/docs/getting-started).
+```bash
+yarn pull-results           # -> artifacts/results.json + artifacts/results.csv
+```
 
-# Troubleshooting
+## Layout
 
-If you're having issues getting the above steps to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
+```
+scripts/seed.ts          method A — build .db with better-sqlite3
+scripts/push-db.ts       adb push + run-as copy into the app sandbox
+src/db/schema.ts         schema, index variants, the two lookup queries
+src/db/rowgen.ts         deterministic row generation, shared by both methods
+src/db/pragmas.ts        runtime pragma axes of the benchmark matrix
+src/db/device.ts         open/inspect + the hot-path query runners
+src/db/seedInApp.ts      method B — in-app seeding
+src/bench/stats.ts       percentiles, variance, clock-resolution probe
+src/bench/matrix.ts      the test matrix (OFAT + explicit interaction cells)
+src/bench/runner.ts      the measured loop; cold-start measurement
+src/bench/export.ts      results -> results.db on the device
+src/bench/coldStartFlag.ts   host↔app handshake for the cold-start run
+scripts/cold-start.ts    force-stop / reboot, relaunch, trigger the measurement
+scripts/pull-results.ts  adb pull results.db -> results.json + results.csv
+src/screens/             one screen per phase
+```
 
-# Learn More
+## Status
 
-To learn more about React Native, take a look at the following resources:
+- [x] Phase 0 — scaffold, TS strict, deps
+- [x] Phase 1 — seeding (method A + B), push tooling, on-device verification screen
+- [x] Phase 2 — benchmark matrix harness *(code complete; not yet run on-device)*
+- [ ] Phase 3 — real scan flow (t0…t3 breakdown) — blocked on swapping in vision-camera v4.7.3
+- [ ] Phase 4 — `RESULTS.md`, CSV/JSON export
 
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+No number in this repo has been measured on-device yet: the first Android build
+is still compiling. `RESULTS.md` does not exist until it does.

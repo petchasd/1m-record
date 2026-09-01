@@ -73,3 +73,7 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# Benchmark datasets and results (hundreds of MB; rebuild with `yarn seed`)
+/artifacts/
+android/local.properties
