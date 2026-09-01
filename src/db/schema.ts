@@ -1,57 +1,44 @@
 /**
- * Single source of truth for the benchmark schema and the lookup SQL.
- * Imported by both the Node seed script and the on-device app so the
- * offline-built .db and the in-app-seeded .db are byte-compatible.
+ * Single source of truth for the schema and the lookup query. Imported by both
+ * the Node seed script and the on-device app so the .db file and the app agree
+ * on column order.
  */
 
-export const DB_NAME = 'items.db';
-
-/** qr_code values look like OBK-000000000001 (12-digit zero-padded ordinal). */
-export const QR_PREFIX = 'OBK-';
-export const QR_DIGITS = 12;
-
-export const qrCodeForId = (id: number): string =>
-  QR_PREFIX + String(id).padStart(QR_DIGITS, '0');
+export const DB_NAME = 'profiles.db';
 
 export const CREATE_TABLE_SQL = `
-CREATE TABLE IF NOT EXISTS items (
-  id           INTEGER PRIMARY KEY,
-  qr_code      TEXT NOT NULL,
-  sku          TEXT NOT NULL,
-  name         TEXT NOT NULL,
-  location     TEXT NOT NULL,
-  qty          INTEGER NOT NULL,
-  updated_at   INTEGER NOT NULL,
-  payload      TEXT
+CREATE TABLE IF NOT EXISTS profiles (
+  id          INTEGER PRIMARY KEY,
+  email       TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  phone       TEXT NOT NULL,
+  city        TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
 );`;
 
-/** Shared by both seeding methods so the placeholder order matches RowTuple. */
+export const INDEX_SQL =
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_email ON profiles(email);';
+
+/** Shared by seed.ts so the placeholder order matches ProfileTuple. */
 export const INSERT_SQL =
-  'INSERT INTO items (id, qr_code, sku, name, location, qty, updated_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)';
+  'INSERT INTO profiles (id, email, name, phone, city, created_at) VALUES (?, ?, ?, ?, ?, ?)';
 
-/** The three index variants the benchmark matrix switches between. */
-export const INDEX_SQL = {
-  none: null,
-  plain: 'CREATE INDEX IF NOT EXISTS idx_items_qr ON items(qr_code);',
-  unique: 'CREATE UNIQUE INDEX IF NOT EXISTS idx_items_qr ON items(qr_code);',
-} as const;
+/** Look a profile up by its email — uses idx_profiles_email. */
+export const LOOKUP_SQL = 'SELECT * FROM profiles WHERE email = ? LIMIT 1;';
 
-export type IndexMode = keyof typeof INDEX_SQL;
+/**
+ * Same query, `NOT INDEXED` forces SQLite to ignore idx_profiles_email and
+ * scan the table row by row — for comparing indexed vs. unindexed lookup
+ * speed without needing a second dataset.
+ */
+export const LOOKUP_SQL_NO_INDEX =
+  'SELECT * FROM profiles NOT INDEXED WHERE email = ? LIMIT 1;';
 
-export const DROP_INDEX_SQL = 'DROP INDEX IF EXISTS idx_items_qr;';
-
-/** The hot-path queries. Nothing else may run inside a measured window. */
-export const LOOKUP_SELECT_STAR = 'SELECT * FROM items WHERE qr_code = ? LIMIT 1;';
-export const LOOKUP_SELECT_3COL =
-  'SELECT id, name, qty FROM items WHERE qr_code = ? LIMIT 1;';
-
-export interface Item {
+export interface Profile {
   id: number;
-  qr_code: string;
-  sku: string;
+  email: string;
   name: string;
-  location: string;
-  qty: number;
-  updated_at: number;
-  payload: string | null;
+  phone: string;
+  city: string;
+  created_at: number;
 }

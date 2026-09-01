@@ -9,10 +9,9 @@
     "start": "react-native start",
     "test": "jest",
     "typecheck": "tsc --noEmit",
+    "setup": "tsx scripts/seed.ts && tsx scripts/push-db.ts",
     "seed": "tsx scripts/seed.ts",
-    "push-db": "tsx scripts/push-db.ts",
-    "pull-results": "tsx scripts/pull-results.ts",
-    "cold-start": "tsx scripts/cold-start.ts"
+    "push-db": "tsx scripts/push-db.ts"
   },
   "dependencies": {
     "@op-engineering/op-sqlite": "^18.1.4",

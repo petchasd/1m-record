@@ -1,0 +1,21 @@
+# Pulls a plain sqlite3 CLI image (no custom build) and points it at the
+# profiles.db seeded on the host by `yarn seed` — for poking at the dataset
+# directly, no Android device/emulator needed.
+#
+#   yarn seed                          # seed artifacts/profiles.db first (once)
+#   docker compose run --rm sqlite     # interactive sqlite> shell
+#
+# One-off query without the interactive prompt (also works from scripts,
+# where there's no real TTY for the interactive shell to attach to):
+#
+#   docker compose run --rm sqlite profiles.db \
+#     "SELECT * FROM profiles WHERE email = 'user500000@example.com';"
+
+services:
+  sqlite:
+    image: keinos/sqlite3
+    volumes:
+      - ./artifacts:/data
+    working_dir: /data
+    entrypoint: ["sqlite3", "-header", "-column"]
+    command: ["profiles.db"]

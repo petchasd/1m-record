@@ -1,35 +1,33 @@
 /**
- * Deterministic row generation, shared by the Node seed script (method A) and
- * the in-app seeder (method B).
+ * Deterministic profile generation, shared by scripts/seed.ts (build time) and
+ * the app (to compute a random *existing* email without querying the device —
+ * see SearchScreen's "random email" button).
  *
- * Both paths MUST consume the RNG in exactly the same order, otherwise the two
- * seeding methods produce different data and their benchmark numbers stop being
- * comparable. Keep the field order in `makeRow` frozen.
+ * Each row is seeded from its own id rather than one RNG advanced row-by-row,
+ * so any row's data — including its email — can be recomputed standalone from
+ * just its id, on either Node or Hermes.
  */
 
-export const WAREHOUSES = ['BKK', 'CNX', 'HKT', 'KKC', 'UBP', 'HDY'] as const;
-
-export const CATEGORIES = [
-  'Bolt',
-  'Bracket',
-  'Cable',
-  'Filter',
-  'Gasket',
-  'Hinge',
-  'Motor',
-  'Panel',
-  'Relay',
-  'Valve',
+const FIRST_NAMES = [
+  'Somchai', 'Suda', 'Anan', 'Malee', 'Kittipong', 'Nualjan', 'Prasert',
+  'Ratana', 'Somsak', 'Wanida', 'Chai', 'Duangjai', 'Niran', 'Ploy',
+  'Thawatchai', 'Areeya', 'Boonmee', 'Chulee', 'Decha', 'Ekasit',
 ] as const;
 
-const HEX = '0123456789abcdef';
+const LAST_NAMES = [
+  'Srisuk', 'Chaiyasit', 'Boonmee', 'Thongdee', 'Rattanakul', 'Suwannee',
+  'Phromma', 'Kaewkla', 'Wongsa', 'Meesuk', 'Panyawong', 'Intharat',
+  'Chantasorn', 'Sombat', 'Yodying',
+] as const;
 
-/** Epoch anchor so `updated_at` does not drift between seed runs. */
-export const SEED_EPOCH = Date.UTC(2026, 0, 1);
+const CITIES = [
+  'Bangkok', 'Chiang Mai', 'Phuket', 'Khon Kaen', 'Udon Thani', 'Hat Yai',
+  'Nakhon Ratchasima', 'Rayong', 'Chonburi', 'Nonthaburi',
+] as const;
 
-/** mulberry32 — small, fast, and identical on Node and Hermes. */
+/** mulberry32 — small, fast, identical on Node and Hermes. */
 /* eslint-disable no-bitwise */
-export const makeRng = (seed: number): (() => number) => {
+const makeRng = (seed: number): (() => number) => {
   let a = seed >>> 0;
   return () => {
     a = (a + 0x6d2b79f5) >>> 0;
@@ -41,51 +39,29 @@ export const makeRng = (seed: number): (() => number) => {
 };
 /* eslint-enable no-bitwise */
 
-export const pick = <T>(rng: () => number, arr: readonly T[]): T =>
+const pick = <T>(rng: () => number, arr: readonly T[]): T =>
   arr[Math.floor(rng() * arr.length)] as T;
 
-/** ~200 bytes of JSON so row size (and therefore page count) is realistic. */
-const makePayload = (rng: () => number, id: number): string => {
-  let filler = '';
-  for (let i = 0; i < 96; i += 1) filler += HEX[Math.floor(rng() * 16)];
-  return JSON.stringify({
-    lot: `L${(id % 9999).toString().padStart(4, '0')}`,
-    bin: `${pick(rng, WAREHOUSES)}-${Math.floor(rng() * 60) + 1}-${Math.floor(rng() * 20) + 1}`,
-    grade: pick(rng, ['A', 'B', 'C']),
-    checksum: filler,
-  });
-};
+/** Epoch anchor so `created_at` does not drift between seed runs. */
+const SEED_EPOCH = Date.UTC(2026, 0, 1);
 
-/** Positional row tuple, ordered to match INSERT_SQL's placeholders. */
-export type RowTuple = [
+/** Purely a function of id — every email is guaranteed unique and derivable. */
+export const emailForId = (id: number): string => `user${id}@example.com`;
+
+export type ProfileTuple = [
   id: number,
-  qr_code: string,
-  sku: string,
+  email: string,
   name: string,
-  location: string,
-  qty: number,
-  updated_at: number,
-  payload: string,
+  phone: string,
+  city: string,
+  created_at: number,
 ];
 
-/**
- * Build one row. `qrCode` is passed in rather than derived here so this module
- * stays free of schema imports and the two callers share one qr formatter.
- */
-export const makeRow = (
-  rng: () => number,
-  id: number,
-  qrCode: string,
-): RowTuple => {
-  const category = pick(rng, CATEGORIES);
-  return [
-    id,
-    qrCode,
-    `SKU-${category.slice(0, 3).toUpperCase()}-${(id % 100000).toString().padStart(5, '0')}`,
-    `${category} ${Math.floor(rng() * 900) + 100}mm`,
-    `${pick(rng, WAREHOUSES)}-${String(Math.floor(rng() * 40) + 1).padStart(2, '0')}-${String(Math.floor(rng() * 12) + 1).padStart(2, '0')}`,
-    Math.floor(rng() * 500),
-    SEED_EPOCH - Math.floor(rng() * 365 * 86400_000),
-    makePayload(rng, id),
-  ];
+export const makeProfile = (id: number): ProfileTuple => {
+  const rng = makeRng(id);
+  const name = `${pick(rng, FIRST_NAMES)} ${pick(rng, LAST_NAMES)}`;
+  const phone = `08${String(Math.floor(rng() * 1e8)).padStart(8, '0')}`;
+  const city = pick(rng, CITIES);
+  const createdAt = SEED_EPOCH - Math.floor(rng() * 365 * 86_400_000);
+  return [id, emailForId(id), name, phone, city, createdAt];
 };
