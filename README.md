@@ -7,6 +7,8 @@ Every search shows how long it took, in seconds.
 That's the whole thing — no benchmark matrix, no multiple phases, no
 in-app seeding. Two moving parts: a seed script and a search screen.
 
+<video src="docs/demo.mov" controls width="360"></video>
+
 ## Stack
 
 | Thing | Version |
